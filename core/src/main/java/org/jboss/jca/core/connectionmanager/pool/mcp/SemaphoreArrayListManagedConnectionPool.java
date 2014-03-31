@@ -275,6 +275,8 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
                      checkedOut.add(cl);
                      statistics.setInUsedCount(checkedOut.size());
                   }
+
+                  doDestroy(cl);
                }
                if (cl != null)
                {
