@@ -35,7 +35,9 @@ import org.jboss.jca.core.connectionmanager.pool.validator.ConnectionValidator;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -113,6 +115,8 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
    /** The checked out connections */
    private final ArrayList<ConnectionListener> checkedOut = new ArrayList<ConnectionListener>();
 
+   private final HashMap< ConnectionListener, Long > connectionsLatestUsage = new HashMap< ConnectionListener, Long >();
+   
    /** Whether the pool has been shutdown */
    private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
@@ -291,6 +295,7 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
 
                         clPermits.put(cl, cl);
 
+                        connectionsLatestUsage.put( cl, System.currentTimeMillis() );
                         return cl;
                      }
 
@@ -359,7 +364,7 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
                   log.trace("supplying new ManagedConnection: " + cl);
 
                clPermits.put(cl, cl);
-
+               connectionsLatestUsage.put( cl, System.currentTimeMillis() );
                return cl;
             }
             catch (Throwable t)
@@ -432,7 +437,7 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
             clPermits.remove(cl);
             permits.release();
          }
-
+         connectionsLatestUsage.remove( cl );
          return;
       }
 
@@ -490,6 +495,7 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
          {
             clPermits.remove(cl);
             permits.release();
+            connectionsLatestUsage.put( cl, Long.MAX_VALUE );
          }
       }
 
@@ -661,9 +667,55 @@ public class SemaphoreArrayListManagedConnectionPool implements ManagedConnectio
                pool.emptyManagedConnectionPool(this);
          }
       }
+      releaseLeakedConnections();
    }
 
    /**
+    * The dirty hack to detect and release leaked connections  
+    */
+   private void releaseLeakedConnections()
+   {
+       long leakMaxTime = System.currentTimeMillis() - 2 * poolConfiguration.getIdleTimeoutMinutes() * 1000L * 60;
+       ArrayList< ConnectionListener > leaked = new ArrayList< ConnectionListener >();
+       log.info( "Checking leaked connection in the pool" );
+       
+       synchronized ( cls )
+       {
+           Iterator< Entry< ConnectionListener, Long >> entryIterator = connectionsLatestUsage.entrySet().iterator();
+           while ( entryIterator.hasNext() )
+           {
+               Entry< ConnectionListener, Long > entry = entryIterator.next();
+            
+               long latestUsage = entry.getValue().longValue();
+               if ( latestUsage < leakMaxTime )
+               {
+                   ConnectionListener cl = entry.getKey();
+                   boolean removed = checkedOut.remove( cl );
+                   if ( removed )
+                   {
+                       leaked.add( cl );
+                   }
+                   entryIterator.remove();
+               }
+           }
+           statistics.setInUsedCount(checkedOut.size());
+       }
+       
+       for ( ConnectionListener cl : leaked )
+       {
+           try 
+           {
+               log.error( "Destroying a leaked connection from the pool" );
+               doDestroy( cl );
+           }
+           catch ( Exception e )
+           {
+               log.error( "Could not destroy a leaked connection", e );
+           }
+       }
+   }
+
+/**
     * {@inheritDoc}
     */
    public void shutdown()
